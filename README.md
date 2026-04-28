@@ -2,7 +2,7 @@
 
 这是一个面向 123 云盘开放平台的 SDK 项目，目标是把官方开放 API 封装成更容易在业务服务端中使用的多语言 SDK。
 
-当前已经完成 Node.js 版本 SDK，后续可以在同一仓库中继续增加 Go、C# 等其他语言实现。每种语言 SDK 都放在独立目录中，并维护自己的 README、测试和构建方式。
+当前已经完成 Node.js 版本 SDK，并新增 .NET/C# 版本 SDK。后续可以在同一仓库中继续增加 Go 等其他语言实现。每种语言 SDK 都放在独立目录中，并维护自己的 README、测试和构建方式。
 
 ## 当前内容
 
@@ -10,6 +10,8 @@
 | --- | --- |
 | [`sdk-nodejs`](./sdk-nodejs) | Node.js / TypeScript SDK，npm 包名为 `chest123-pan-sdk` |
 | [`sdk-nodejs/README.md`](./sdk-nodejs/README.md) | Node.js SDK 使用文档 |
+| [`sdk-dotnet`](./sdk-dotnet) | C#/.NET SDK，NuGet 包名为 `Chest123.PanSdk` |
+| [`sdk-dotnet/README.md`](./sdk-dotnet/README.md) | .NET SDK 使用文档 |
 | [`123PanDoc`](./123PanDoc) | 123 云盘官方开放平台 API 的本地整理文档 |
 | [`123PanDoc/99-endpoint-index.md`](./123PanDoc/99-endpoint-index.md) | API 接口总索引 |
 
@@ -35,6 +37,31 @@ const files = await client.files.list({
 
 更多用法见 [`sdk-nodejs/README.md`](./sdk-nodejs/README.md)。
 
+## .NET SDK
+
+.NET SDK 封装同一套 123 云盘开放平台能力，适用于 ASP.NET Core、Worker Service、控制台程序、桌面程序等 C# 项目。
+
+最小示例：
+
+```csharp
+using Chest123.PanSdk;
+using Chest123.PanSdk.Models;
+
+var client = new Pan123Client(new Pan123ClientOptions
+{
+    ClientId = Environment.GetEnvironmentVariable("PAN123_CLIENT_ID"),
+    ClientSecret = Environment.GetEnvironmentVariable("PAN123_CLIENT_SECRET")
+});
+
+var files = await client.Files.ListAsync(new FileListRequest
+{
+    ParentFileId = 0,
+    Limit = 100
+});
+```
+
+更多用法见 [`sdk-dotnet/README.md`](./sdk-dotnet/README.md)。
+
 ## 官方 API 文档
 
 `123PanDoc` 是基于 123 云盘官方语雀文档整理出的本地 Markdown 文档集，方便开发 SDK 时查阅接口路径、请求参数、响应字段、上传流程和直链流程。
@@ -53,7 +80,7 @@ const files = await client.files.list({
 ```text
 sdk-nodejs/
 sdk-go/
-sdk-csharp/
+sdk-dotnet/
 ```
 
 每个 SDK 目录应独立包含：
