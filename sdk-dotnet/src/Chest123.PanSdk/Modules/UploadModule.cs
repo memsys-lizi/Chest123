@@ -56,6 +56,22 @@ public sealed class UploadModule : ApiModule
     public Task<UploadCreateData?> Sha1ReuseAsync(object request, CancellationToken cancellationToken = default)
         => Http.SendAsync<UploadCreateData>(HttpMethod.Post, "/upload/v2/file/sha1_reuse", new Pan123RequestOptions { Body = request }, cancellationToken);
 
+    private async Task<UploadCompleteData?> PollUploadCompleteAsync(string preuploadID, UploadFileRequest request, CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; attempt < request.UploadCompleteMaxAttempts; attempt++)
+        {
+            var completed = await CompleteAsync(preuploadID, cancellationToken).ConfigureAwait(false);
+            if (completed is not null && completed.Completed && completed.FileID > 0)
+            {
+                return completed;
+            }
+            await Task.Delay(request.UploadCompletePollInterval, cancellationToken).ConfigureAwait(false);
+        }
+        var approxSeconds = (int)(request.UploadCompleteMaxAttempts * request.UploadCompletePollInterval.TotalSeconds);
+        throw new Pan123ApiException(
+            $"Upload completion did not finish after {request.UploadCompleteMaxAttempts} polling attempts (~{approxSeconds}s). Increase UploadCompleteMaxAttempts or UploadCompletePollInterval if the server is slow.");
+    }
+
     public async Task<UploadFileResult> UploadFileAsync(UploadFileRequest request, CancellationToken cancellationToken = default)
     {
         var fileInfo = new System.IO.FileInfo(request.FilePath);
@@ -78,7 +94,18 @@ public sealed class UploadModule : ApiModule
             if (domains is null || domains.Count == 0) throw new Pan123ApiException("No upload domain returned.");
             var result = await SingleAsync(domains[0], request.FilePath, uploadRequest, cancellationToken).ConfigureAwait(false);
             if (result is null) throw new Pan123ApiException("Single upload returned no data.");
-            return new UploadFileResult { FileID = result.FileID, Completed = result.Completed };
+            if (result.Completed && result.FileID > 0)
+            {
+                return new UploadFileResult { FileID = result.FileID, Completed = true };
+            }
+            if (!string.IsNullOrWhiteSpace(result.PreuploadID))
+            {
+                var done = await PollUploadCompleteAsync(result.PreuploadID!, request, cancellationToken).ConfigureAwait(false);
+                if (done is null) throw new Pan123ApiException("Upload completion polling returned no data.");
+                return new UploadFileResult { FileID = done.FileID, Completed = true };
+            }
+            throw new Pan123ApiException(
+                "Single upload did not return fileID and completed=true, and no preuploadID was returned for polling upload_complete. Check API response or reduce SingleUploadMaxBytes to use multipart upload.");
         }
 
         var created = await CreateAsync(uploadRequest, cancellationToken).ConfigureAwait(false);
@@ -106,17 +133,9 @@ public sealed class UploadModule : ApiModule
             sliceNo++;
         }
 
-        for (var attempt = 0; attempt < 60; attempt++)
-        {
-            var completed = await CompleteAsync(preuploadID, cancellationToken).ConfigureAwait(false);
-            if (completed is not null && completed.Completed && completed.FileID > 0)
-            {
-                return new UploadFileResult { FileID = completed.FileID, Completed = true };
-            }
-            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
-        }
-
-        throw new Pan123ApiException("Upload completion did not finish after 60 polling attempts.");
+        var multipartDone = await PollUploadCompleteAsync(preuploadID, request, cancellationToken).ConfigureAwait(false);
+        if (multipartDone is null) throw new Pan123ApiException("Upload completion polling returned no data.");
+        return new UploadFileResult { FileID = multipartDone.FileID, Completed = true };
     }
 }
 

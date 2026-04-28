@@ -13,6 +13,8 @@ import type {
 } from '../types.js';
 
 const SINGLE_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024;
+const DEFAULT_UPLOAD_COMPLETE_MAX_ATTEMPTS = 300;
+const DEFAULT_UPLOAD_COMPLETE_POLL_INTERVAL_MS = 1000;
 
 async function readFileRange(filePath: string, start: number, length: number): Promise<Buffer> {
   const handle = await open(filePath, 'r');
@@ -26,6 +28,25 @@ async function readFileRange(filePath: string, start: number, length: number): P
 }
 
 export class UploadModule extends ApiModule {
+  private async pollUploadComplete(
+    preuploadID: string,
+    options: UploadFileOptions
+  ): Promise<UploadCompleteData> {
+    const maxAttempts = options.uploadCompleteMaxAttempts ?? DEFAULT_UPLOAD_COMPLETE_MAX_ATTEMPTS;
+    const intervalMs = options.uploadCompletePollIntervalMs ?? DEFAULT_UPLOAD_COMPLETE_POLL_INTERVAL_MS;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const completed = await this.complete({ preuploadID });
+      if (completed.completed && completed.fileID > 0) {
+        return completed;
+      }
+      await new Promise(resolve => setTimeout(resolve, intervalMs));
+    }
+    const approxSeconds = Math.round((maxAttempts * intervalMs) / 1000);
+    throw new Pan123ApiError({
+      message: `Upload completion did not finish after ${maxAttempts} polling attempts (~${approxSeconds}s). Increase uploadCompleteMaxAttempts or uploadCompletePollIntervalMs if the server is slow.`
+    });
+  }
+
   create(params: UploadCreateParams): Promise<UploadCreateData> {
     return this.http.request('POST', '/upload/v2/file/create', { body: params });
   }
@@ -85,10 +106,23 @@ export class UploadModule extends ApiModule {
 
     if (size <= maxSingleBytes) {
       const data = await this.singleUpload({ ...baseParams, filePath: options.filePath });
-      return {
-        fileID: data.fileID,
-        completed: data.completed
-      };
+      if (data.completed && data.fileID > 0) {
+        return {
+          fileID: data.fileID,
+          completed: true
+        };
+      }
+      if (data.preuploadID) {
+        const done = await this.pollUploadComplete(data.preuploadID, options);
+        return {
+          fileID: done.fileID,
+          completed: true
+        };
+      }
+      throw new Pan123ApiError({
+        message:
+          'Single upload did not return fileID and completed=true, and no preuploadID was returned for polling upload_complete. Check API response or try multipart upload (reduce singleUploadMaxBytes).'
+      });
     }
 
     const created = await this.create(baseParams);
@@ -122,20 +156,11 @@ export class UploadModule extends ApiModule {
       });
     }
 
-    for (let attempt = 0; attempt < 60; attempt++) {
-      const completed = await this.complete({ preuploadID: created.preuploadID });
-      if (completed.completed && completed.fileID) {
-        return {
-          fileID: completed.fileID,
-          completed: true
-        };
-      }
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-
-    throw new Pan123ApiError({
-      message: 'Upload completion did not finish after 60 polling attempts'
-    });
+    const done = await this.pollUploadComplete(created.preuploadID, options);
+    return {
+      fileID: done.fileID,
+      completed: true
+    };
   }
 
   private async singleUpload(params: UploadCreateParams & { uploadURL?: string; filePath: string }): Promise<UploadCompleteData> {

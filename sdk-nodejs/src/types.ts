@@ -121,6 +121,8 @@ export interface UploadCreateData {
 export interface UploadCompleteData {
   completed: boolean;
   fileID: number;
+  /** Present when single-upload is still processing server-side; poll `/upload/v2/file/upload_complete` with this id. */
+  preuploadID?: string;
 }
 
 export interface UploadFileOptions {
@@ -134,6 +136,13 @@ export interface UploadFileOptions {
    * Lower values are useful for tests.
    */
   singleUploadMaxBytes?: number;
+  /**
+   * Max polling attempts after `/upload/v2/file/upload_complete` returns `completed: false`
+   * (server-side merge/verification). Default 300 (~5 minutes at 1s interval).
+   */
+  uploadCompleteMaxAttempts?: number;
+  /** Delay between polls in ms. Default 1000. */
+  uploadCompletePollIntervalMs?: number;
 }
 
 export interface UploadFileResult {

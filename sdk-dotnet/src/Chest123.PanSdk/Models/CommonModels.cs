@@ -168,6 +168,12 @@ public sealed class UploadCompleteData
 
     [JsonPropertyName("fileID")]
     public long FileID { get; set; }
+
+    /// <summary>
+    /// When single-upload is still processing server-side, poll <c>/upload/v2/file/upload_complete</c> with this id.
+    /// </summary>
+    [JsonPropertyName("preuploadID")]
+    public string? PreuploadID { get; set; }
 }
 
 public sealed class UploadFileRequest
@@ -178,6 +184,16 @@ public sealed class UploadFileRequest
     public int? Duplicate { get; set; }
     public bool? ContainDir { get; set; }
     public long SingleUploadMaxBytes { get; set; } = 1024L * 1024 * 1024;
+
+    /// <summary>
+    /// Max polling attempts when <c>/upload/v2/file/upload_complete</c> returns <c>completed: false</c>. Default 300 (~5 minutes at 1s interval).
+    /// </summary>
+    public int UploadCompleteMaxAttempts { get; set; } = 300;
+
+    /// <summary>
+    /// Delay between polls. Default 1 second.
+    /// </summary>
+    public TimeSpan UploadCompletePollInterval { get; set; } = TimeSpan.FromSeconds(1);
 }
 
 public sealed class UploadFileResult

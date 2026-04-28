@@ -154,6 +154,49 @@ describe('Pan123Client', () => {
     }
   });
 
+  it('polls upload_complete when single-upload returns completed=false with preuploadID', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'pan123-single-async-'));
+    const filePath = path.join(dir, 'big.bin');
+    await writeFile(filePath, 'x'.repeat(500));
+
+    try {
+      mockToken();
+      nock(baseURL)
+        .get('/upload/v2/file/domain')
+        .reply(200, {
+          code: 0,
+          message: 'ok',
+          data: [uploadURL]
+        });
+      nock(uploadURL)
+        .post('/upload/v2/file/single/create')
+        .reply(200, {
+          code: 0,
+          message: 'ok',
+          data: { fileID: 0, completed: false, preuploadID: 'pre-async-1' }
+        });
+      const completeScope = nock(baseURL)
+        .post('/upload/v2/file/upload_complete', { preuploadID: 'pre-async-1' })
+        .reply(200, {
+          code: 0,
+          message: 'ok',
+          data: { fileID: 3003, completed: true }
+        });
+
+      const client = createPan123Client({ clientId: 'client', clientSecret: 'secret' });
+      await expect(
+        client.upload.uploadFile({
+          filePath,
+          parentFileID: 0,
+          duplicate: 1
+        })
+      ).resolves.toEqual({ fileID: 3003, completed: true });
+      expect(completeScope.isDone()).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('uploads large files with the V2 multipart helper', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'pan123-large-'));
     const filePath = path.join(dir, 'large.txt');
