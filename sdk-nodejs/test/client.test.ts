@@ -1,0 +1,206 @@
+import { afterEach, describe, expect, it } from 'vitest';
+import nock from 'nock';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { createPan123Client, Pan123ApiError } from '../src/index.js';
+
+const baseURL = 'https://open-api.123pan.com';
+const uploadURL = 'https://upload.example.com';
+
+function mockToken(expiredAt = '2099-01-01T00:00:00+08:00') {
+  return nock(baseURL)
+    .post('/api/v1/access_token', {
+      clientID: 'client',
+      clientSecret: 'secret'
+    })
+    .matchHeader('Platform', 'open_platform')
+    .reply(200, {
+      code: 0,
+      message: 'ok',
+      data: {
+        accessToken: 'token-123',
+        expiredAt
+      },
+      'x-traceID': 'trace-token'
+    });
+}
+
+describe('Pan123Client', () => {
+  afterEach(() => {
+    nock.cleanAll();
+  });
+
+  it('gets and caches access tokens while adding common headers', async () => {
+    const tokenScope = mockToken();
+    const userScope = nock(baseURL)
+      .get('/api/v1/user/info')
+      .twice()
+      .matchHeader('Platform', 'open_platform')
+      .matchHeader('Authorization', 'Bearer token-123')
+      .reply(200, {
+        code: 0,
+        message: 'ok',
+        data: { uid: 1 }
+      });
+
+    const client = createPan123Client({ clientId: 'client', clientSecret: 'secret' });
+    await expect(client.user.info()).resolves.toEqual({ uid: 1 });
+    await expect(client.user.info()).resolves.toEqual({ uid: 1 });
+
+    expect(tokenScope.isDone()).toBe(true);
+    expect(userScope.isDone()).toBe(true);
+  });
+
+  it('refreshes expired supplied tokens', async () => {
+    const tokenScope = mockToken();
+    const listScope = nock(baseURL)
+      .get('/api/v2/file/list')
+      .query({ parentFileId: 0, limit: 100 })
+      .matchHeader('Authorization', 'Bearer token-123')
+      .reply(200, {
+        code: 0,
+        message: 'ok',
+        data: { lastFileId: -1, fileList: [] }
+      });
+
+    const client = createPan123Client({
+      clientId: 'client',
+      clientSecret: 'secret',
+      accessToken: 'old-token',
+      tokenExpiresAt: Date.now() - 1000
+    });
+
+    await expect(client.files.list({ parentFileId: 0, limit: 100 })).resolves.toEqual({
+      lastFileId: -1,
+      fileList: []
+    });
+    expect(tokenScope.isDone()).toBe(true);
+    expect(listScope.isDone()).toBe(true);
+  });
+
+  it('throws Pan123ApiError when API code is non-zero', async () => {
+    mockToken();
+    nock(baseURL)
+      .get('/api/v1/user/info')
+      .reply(200, {
+        code: 401,
+        message: 'access_token无效',
+        data: null,
+        'x-traceID': 'trace-error'
+      });
+
+    const client = createPan123Client({ clientId: 'client', clientSecret: 'secret' });
+    await expect(client.user.info()).rejects.toMatchObject({
+      name: 'Pan123ApiError',
+      code: 401,
+      traceId: 'trace-error'
+    } satisfies Partial<Pan123ApiError>);
+  });
+
+  it('supports the low-level request escape hatch', async () => {
+    mockToken();
+    const scope = nock(baseURL)
+      .get('/api/v1/file/detail')
+      .query({ fileID: 42 })
+      .reply(200, {
+        code: 0,
+        message: 'ok',
+        data: { fileID: 42 }
+      });
+
+    const client = createPan123Client({ clientId: 'client', clientSecret: 'secret' });
+    await expect(client.request('GET', '/api/v1/file/detail', { query: { fileID: 42 } })).resolves.toEqual({
+      fileID: 42
+    });
+    expect(scope.isDone()).toBe(true);
+  });
+
+  it('uploads small files with the V2 single-upload helper', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'pan123-small-'));
+    const filePath = path.join(dir, 'small.txt');
+    await writeFile(filePath, 'hello');
+
+    try {
+      mockToken();
+      nock(baseURL)
+        .get('/upload/v2/file/domain')
+        .reply(200, {
+          code: 0,
+          message: 'ok',
+          data: [uploadURL]
+        });
+      const singleScope = nock(uploadURL)
+        .post('/upload/v2/file/single/create')
+        .matchHeader('Platform', 'open_platform')
+        .matchHeader('Authorization', 'Bearer token-123')
+        .reply(200, {
+          code: 0,
+          message: 'ok',
+          data: { fileID: 1001, completed: true }
+        });
+
+      const client = createPan123Client({ clientId: 'client', clientSecret: 'secret' });
+      await expect(
+        client.upload.uploadFile({
+          filePath,
+          parentFileID: 0,
+          duplicate: 1
+        })
+      ).resolves.toEqual({ fileID: 1001, completed: true });
+      expect(singleScope.isDone()).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('uploads large files with the V2 multipart helper', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'pan123-large-'));
+    const filePath = path.join(dir, 'large.txt');
+    await writeFile(filePath, 'abcdef');
+
+    try {
+      mockToken();
+      nock(baseURL)
+        .post('/upload/v2/file/create')
+        .reply(200, {
+          code: 0,
+          message: 'ok',
+          data: {
+            fileID: 0,
+            reuse: false,
+            preuploadID: 'pre-1',
+            sliceSize: 2,
+            servers: [uploadURL]
+          }
+        });
+      const slices = nock(uploadURL)
+        .post('/upload/v2/file/slice')
+        .times(3)
+        .reply(200, {
+          code: 0,
+          message: 'ok',
+          data: null
+        });
+      nock(baseURL)
+        .post('/upload/v2/file/upload_complete', { preuploadID: 'pre-1' })
+        .reply(200, {
+          code: 0,
+          message: 'ok',
+          data: { fileID: 2002, completed: true }
+        });
+
+      const client = createPan123Client({ clientId: 'client', clientSecret: 'secret' });
+      await expect(
+        client.upload.uploadFile({
+          filePath,
+          parentFileID: 0,
+          singleUploadMaxBytes: 1
+        })
+      ).resolves.toEqual({ fileID: 2002, completed: true });
+      expect(slices.isDone()).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
