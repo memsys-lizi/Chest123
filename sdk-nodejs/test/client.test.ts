@@ -181,6 +181,36 @@ describe('Pan123Client', () => {
     expect(downloadResponse.isDone()).toBe(true);
   });
 
+  it('retries upload completion while the file is still checking', async () => {
+    mockToken();
+    const checkingResponse = nock(baseURL)
+      .post('/upload/v2/file/upload_complete', { preuploadID: 'pre-checking' })
+      .reply(200, {
+        code: 20103,
+        message: '文件正在校验中,请间隔1秒后再试',
+        data: null,
+        'x-traceID': 'trace-checking'
+      });
+    const completeResponse = nock(baseURL)
+      .post('/upload/v2/file/upload_complete', { preuploadID: 'pre-checking' })
+      .reply(200, {
+        code: 0,
+        message: 'ok',
+        data: { completed: true, fileID: 1003 }
+      });
+
+    const client = createPan123Client({ clientId: 'client', clientSecret: 'secret' });
+    await expect(
+      client.upload.complete({
+        preuploadID: 'pre-checking',
+        checkingRetryAttempts: 2,
+        checkingRetryDelayMs: 0
+      })
+    ).resolves.toEqual({ completed: true, fileID: 1003 });
+    expect(checkingResponse.isDone()).toBe(true);
+    expect(completeResponse.isDone()).toBe(true);
+  });
+
   it('uploads small files with the V2 single-upload helper', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'pan123-small-'));
     const filePath = path.join(dir, 'small.txt');

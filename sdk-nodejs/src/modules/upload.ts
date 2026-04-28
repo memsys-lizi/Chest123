@@ -3,6 +3,7 @@ import { open, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { Pan123ApiError } from '../errors.js';
 import { md5Buffer, md5File } from '../hash.js';
+import { retryWhileFileChecking, type FileCheckingRetryOptions } from './file-checking.js';
 import { ApiModule, type AnyData } from './types.js';
 import type {
   UploadCompleteData,
@@ -13,6 +14,10 @@ import type {
 } from '../types.js';
 
 const SINGLE_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024;
+
+interface UploadCompleteParams extends FileCheckingRetryOptions {
+  preuploadID: string;
+}
 
 async function readFileRange(filePath: string, start: number, length: number): Promise<Buffer> {
   const handle = await open(filePath, 'r');
@@ -52,8 +57,16 @@ export class UploadModule extends ApiModule {
     });
   }
 
-  complete(params: { preuploadID: string }): Promise<UploadCompleteData> {
-    return this.http.request('POST', '/upload/v2/file/upload_complete', { body: params });
+  complete(params: UploadCompleteParams): Promise<UploadCompleteData> {
+    return retryWhileFileChecking(
+      () =>
+        this.http.request('POST', '/upload/v2/file/upload_complete', {
+          body: {
+            preuploadID: params.preuploadID
+          }
+        }),
+      params
+    );
   }
 
   domain(): Promise<string[]> {
