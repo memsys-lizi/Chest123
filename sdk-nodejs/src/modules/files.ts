@@ -1,5 +1,10 @@
+import { retryWhileFileChecking, type FileCheckingRetryOptions } from './file-checking.js';
 import { ApiModule, type AnyData } from './types.js';
 import type { DownloadInfoData, FileListData, FileListParams } from '../types.js';
+
+interface DownloadInfoParams extends FileCheckingRetryOptions {
+  fileId: number;
+}
 
 export class FilesModule extends ApiModule {
   mkdir(params: { name: string; parentID: number }): Promise<{ dirID: number }> {
@@ -58,7 +63,15 @@ export class FilesModule extends ApiModule {
     return this.http.request('POST', '/api/v1/file/move', { body: params });
   }
 
-  downloadInfo(params: { fileId: number }): Promise<DownloadInfoData> {
-    return this.http.request('GET', '/api/v1/file/download_info', { query: params });
+  downloadInfo(params: DownloadInfoParams): Promise<DownloadInfoData> {
+    return retryWhileFileChecking(
+      () =>
+        this.http.request('GET', '/api/v1/file/download_info', {
+          query: {
+            fileId: params.fileId
+          }
+        }),
+      params
+    );
   }
 }

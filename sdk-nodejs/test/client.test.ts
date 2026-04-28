@@ -116,6 +116,71 @@ describe('Pan123Client', () => {
     expect(scope.isDone()).toBe(true);
   });
 
+  it('retries direct-link URL lookup while the file is still checking', async () => {
+    mockToken();
+    const checkingResponses = nock(baseURL)
+      .get('/api/v1/direct-link/url')
+      .query({ fileID: 1001 })
+      .twice()
+      .reply(200, {
+        code: 20103,
+        message: '文件正在校验中,请间隔1秒后再试',
+        data: null,
+        'x-traceID': 'trace-checking'
+      });
+    const urlResponse = nock(baseURL)
+      .get('/api/v1/direct-link/url')
+      .query({ fileID: 1001 })
+      .reply(200, {
+        code: 0,
+        message: 'ok',
+        data: { url: 'https://example.com/file.txt' }
+      });
+
+    const client = createPan123Client({ clientId: 'client', clientSecret: 'secret' });
+    await expect(
+      client.directLink.url({
+        fileID: 1001,
+        checkingRetryAttempts: 3,
+        checkingRetryDelayMs: 0
+      })
+    ).resolves.toEqual({ url: 'https://example.com/file.txt' });
+    expect(checkingResponses.isDone()).toBe(true);
+    expect(urlResponse.isDone()).toBe(true);
+  });
+
+  it('retries download info lookup while the file is still checking', async () => {
+    mockToken();
+    const checkingResponse = nock(baseURL)
+      .get('/api/v1/file/download_info')
+      .query({ fileId: 1002 })
+      .reply(200, {
+        code: 20103,
+        message: '文件正在校验中,请间隔1秒后再试',
+        data: null,
+        'x-traceID': 'trace-checking'
+      });
+    const downloadResponse = nock(baseURL)
+      .get('/api/v1/file/download_info')
+      .query({ fileId: 1002 })
+      .reply(200, {
+        code: 0,
+        message: 'ok',
+        data: { downloadUrl: 'https://example.com/download/file.txt' }
+      });
+
+    const client = createPan123Client({ clientId: 'client', clientSecret: 'secret' });
+    await expect(
+      client.files.downloadInfo({
+        fileId: 1002,
+        checkingRetryAttempts: 2,
+        checkingRetryDelayMs: 0
+      })
+    ).resolves.toEqual({ downloadUrl: 'https://example.com/download/file.txt' });
+    expect(checkingResponse.isDone()).toBe(true);
+    expect(downloadResponse.isDone()).toBe(true);
+  });
+
   it('uploads small files with the V2 single-upload helper', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'pan123-small-'));
     const filePath = path.join(dir, 'small.txt');

@@ -1,5 +1,10 @@
+import { retryWhileFileChecking, type FileCheckingRetryOptions } from './file-checking.js';
 import { ApiModule, type AnyData } from './types.js';
 import type { DirectLinkUrlData } from '../types.js';
+
+interface DirectLinkUrlParams extends FileCheckingRetryOptions {
+  fileID: number;
+}
 
 export class DirectLinkModule extends ApiModule {
   enable(params: { fileID: number }): Promise<unknown> {
@@ -10,8 +15,16 @@ export class DirectLinkModule extends ApiModule {
     return this.http.request('POST', '/api/v1/direct-link/disable', { body: params });
   }
 
-  url(params: { fileID: number }): Promise<DirectLinkUrlData> {
-    return this.http.request('GET', '/api/v1/direct-link/url', { query: params });
+  async url(params: DirectLinkUrlParams): Promise<DirectLinkUrlData> {
+    return retryWhileFileChecking(
+      () =>
+        this.http.request('GET', '/api/v1/direct-link/url', {
+          query: {
+            fileID: params.fileID
+          }
+        }),
+      params
+    );
   }
 
   refreshCache(): Promise<unknown> {
