@@ -19,6 +19,14 @@ const client = createPan123Client({
 });
 ```
 
+Token 行为：
+
+- SDK 会自动获取、缓存并维护 `access_token`。
+- 调用需要鉴权的业务接口时，SDK 会先检查当前 token 是否可用。
+- 如果没有 token，或 token 已过期/即将过期，SDK 会自动调用 `POST /api/v1/access_token` 获取新 token。
+- 正常业务代码可以直接调用 `client.files.list(...)`、`client.upload.uploadFile(...)` 等方法，不需要手动先获取 token。
+- `client.auth.ensureAccessToken()` 是可选方法，适合你想提前预热 token 或调试 token 状态时使用。
+
 ## 客户端配置
 
 | 参数 | 类型 | 必填 | 默认值 | 说明 |
@@ -83,6 +91,8 @@ HTTP：本地 helper，必要时调用 `POST /api/v1/access_token`。
 ```ts
 const token = await client.auth.ensureAccessToken();
 ```
+
+注意：所有需要鉴权的 SDK 方法内部都会自动执行这个逻辑。除非你想提前获取 token，否则不需要在每次业务调用前手动调用。
 
 ### `client.auth.setAccessToken(token, expiresAt?)`
 
