@@ -1,4 +1,4 @@
-# @chest123/pan-sdk
+# chest123-pan-sdk
 
 123 云盘开放平台 Node.js SDK。它面向服务端开发者，封装了鉴权、文件管理、上传、下载链接、直链、分享、离线下载、图床和视频转码等接口，减少直接拼 HTTP 请求的工作量。
 
@@ -7,7 +7,7 @@ SDK 依据仓库中的 [`../123PanDoc`](../123PanDoc) 官方 API 整理文档实
 ## 安装
 
 ```bash
-npm install @chest123/pan-sdk
+npm install chest123-pan-sdk
 ```
 
 要求 Node.js `>= 18`。
@@ -15,7 +15,7 @@ npm install @chest123/pan-sdk
 ## 快速开始
 
 ```ts
-import { createPan123Client } from '@chest123/pan-sdk';
+import { createPan123Client } from 'chest123-pan-sdk';
 
 const client = createPan123Client({
   clientId: process.env.PAN123_CLIENT_ID,
@@ -36,7 +36,7 @@ console.log(root.fileList);
 ## 客户端配置
 
 ```ts
-import { Pan123Client } from '@chest123/pan-sdk';
+import { Pan123Client } from 'chest123-pan-sdk';
 
 const client = new Pan123Client({
   clientId: 'your_client_id',
@@ -344,7 +344,7 @@ const data = await client.request('GET', '/api/v1/file/detail', {
 当 HTTP 请求失败，或 123 云盘响应体 `code !== 0` 时，SDK 会抛出 `Pan123ApiError`。
 
 ```ts
-import { Pan123ApiError } from '@chest123/pan-sdk';
+import { Pan123ApiError } from 'chest123-pan-sdk';
 
 try {
   await client.files.detail({ fileID: 404 });

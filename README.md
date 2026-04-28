@@ -8,7 +8,7 @@
 
 | 路径 | 说明 |
 | --- | --- |
-| [`sdk-nodejs`](./sdk-nodejs) | Node.js / TypeScript SDK，npm 包名为 `@chest123/pan-sdk` |
+| [`sdk-nodejs`](./sdk-nodejs) | Node.js / TypeScript SDK，npm 包名为 `chest123-pan-sdk` |
 | [`sdk-nodejs/README.md`](./sdk-nodejs/README.md) | Node.js SDK 使用文档 |
 | [`123PanDoc`](./123PanDoc) | 123 云盘官方开放平台 API 的本地整理文档 |
 | [`123PanDoc/99-endpoint-index.md`](./123PanDoc/99-endpoint-index.md) | API 接口总索引 |
@@ -20,7 +20,7 @@ Node.js SDK 封装了 123 云盘开放平台的鉴权、文件管理、上传、
 最小示例：
 
 ```ts
-import { createPan123Client } from '@chest123/pan-sdk';
+import { createPan123Client } from 'chest123-pan-sdk';
 
 const client = createPan123Client({
   clientId: process.env.PAN123_CLIENT_ID,
