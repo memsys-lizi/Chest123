@@ -9,15 +9,32 @@ import type {
   UploadCompleteData,
   UploadCreateData,
   UploadCreateParams,
+  UploadProgressEvent,
   UploadFileOptions,
   UploadFileResult
 } from '../types.js';
 
 const SINGLE_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024;
+const DEFAULT_COMPLETE_POLLING_ATTEMPTS = 60;
+const DEFAULT_COMPLETE_POLLING_DELAY_MS = 1000;
+const DEFAULT_TRANSIENT_RETRY_ATTEMPTS = 5;
+const DEFAULT_TRANSIENT_RETRY_DELAY_MS = 1000;
 
 interface UploadCompleteParams extends FileCheckingRetryOptions {
   preuploadID: string;
 }
+
+interface UploadRetryOptions {
+  transientRetryAttempts?: number;
+  transientRetryDelayMs?: number;
+}
+
+interface CompletePollingOptions {
+  completePollingAttempts?: number;
+  completePollingDelayMs?: number;
+}
+
+type ProgressCallback = UploadFileOptions['onProgress'];
 
 async function readFileRange(filePath: string, start: number, length: number): Promise<Buffer> {
   const handle = await open(filePath, 'r');
@@ -28,6 +45,59 @@ async function readFileRange(filePath: string, start: number, length: number): P
   } finally {
     await handle.close();
   }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function positiveInteger(value: number | undefined, fallback: number): number {
+  return Math.max(1, Math.floor(value ?? fallback));
+}
+
+function nonNegativeInteger(value: number | undefined, fallback: number): number {
+  return Math.max(0, Math.floor(value ?? fallback));
+}
+
+function isCompletedUpload(data: UploadCompleteData | undefined): data is UploadCompleteData {
+  return Boolean(data?.completed && data.fileID > 0);
+}
+
+function assertCompletedUpload(data: UploadCompleteData, context: string): UploadCompleteData {
+  if (isCompletedUpload(data)) return data;
+  throw new Pan123ApiError({
+    message: `${context} did not return a completed upload with a valid fileID.`,
+    response: data
+  });
+}
+
+function isTransientUploadError(error: unknown): boolean {
+  if (!(error instanceof Pan123ApiError)) return false;
+  if (error.status === 429 || error.code === 429) return true;
+  const message = error.message;
+  return error.code === 1 && (message.includes('秒传队列') || message.includes('削峰') || message.includes('请慢一点'));
+}
+
+async function retryTransientUpload<T>(task: () => Promise<T>, options: UploadRetryOptions = {}): Promise<T> {
+  const attempts = positiveInteger(options.transientRetryAttempts, DEFAULT_TRANSIENT_RETRY_ATTEMPTS);
+  const delayMs = nonNegativeInteger(options.transientRetryDelayMs, DEFAULT_TRANSIENT_RETRY_DELAY_MS);
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await task();
+    } catch (error) {
+      if (!isTransientUploadError(error) || attempt === attempts) {
+        throw error;
+      }
+      await delay(delayMs);
+    }
+  }
+
+  throw new Pan123ApiError({ message: 'Transient upload retry attempts were exhausted.' });
+}
+
+async function emitProgress(callback: ProgressCallback, event: UploadProgressEvent): Promise<void> {
+  await callback?.(event);
 }
 
 export class UploadModule extends ApiModule {
@@ -69,12 +139,16 @@ export class UploadModule extends ApiModule {
     );
   }
 
+  waitComplete(params: UploadCompleteParams & CompletePollingOptions): Promise<UploadCompleteData> {
+    return this.waitForUploadComplete(params.preuploadID, params, undefined, 0);
+  }
+
   domain(): Promise<string[]> {
     return this.http.request('GET', '/upload/v2/file/domain');
   }
 
   single(params: UploadCreateParams & { uploadURL?: string; filePath: string }): Promise<UploadCompleteData> {
-    return this.singleUpload(params);
+    return this.singleUpload(params).then(data => assertCompletedUpload(data, 'Single upload'));
   }
 
   sha1Reuse(params: AnyData): Promise<UploadCreateData> {
@@ -84,8 +158,20 @@ export class UploadModule extends ApiModule {
   async uploadFile(options: UploadFileOptions): Promise<UploadFileResult> {
     const fileStat = await stat(options.filePath);
     const filename = options.filename ?? path.basename(options.filePath);
+    await emitProgress(options.onProgress, {
+      stage: 'hashing',
+      loadedBytes: 0,
+      totalBytes: fileStat.size,
+      percent: 0
+    });
     const etag = await md5File(options.filePath);
     const size = fileStat.size;
+    await emitProgress(options.onProgress, {
+      stage: 'hashing',
+      loadedBytes: size,
+      totalBytes: size,
+      percent: 100
+    });
     const baseParams: UploadCreateParams = {
       parentFileID: options.parentFileID,
       filename,
@@ -97,17 +183,49 @@ export class UploadModule extends ApiModule {
     const maxSingleBytes = options.singleUploadMaxBytes ?? SINGLE_UPLOAD_MAX_BYTES;
 
     if (size <= maxSingleBytes) {
-      const data = await this.singleUpload({ ...baseParams, filePath: options.filePath });
+      const uploadURL = (await this.domain())[0];
+      if (!uploadURL) {
+        throw new Pan123ApiError({ message: 'No upload domain returned by /upload/v2/file/domain' });
+      }
+      const data = await retryTransientUpload(
+        () => this.singleUpload({ ...baseParams, uploadURL, filePath: options.filePath }),
+        options
+      );
+      const completed = assertCompletedUpload(data, 'Single upload');
+      await emitProgress(options.onProgress, {
+        stage: 'single',
+        loadedBytes: size,
+        totalBytes: size,
+        percent: 100
+      });
       return {
-        fileID: data.fileID,
-        completed: data.completed
+        fileID: completed.fileID,
+        completed: true
       };
     }
 
-    const created = await this.create(baseParams);
+    await emitProgress(options.onProgress, {
+      stage: 'create',
+      loadedBytes: 0,
+      totalBytes: size,
+      percent: 0
+    });
+    const created = await retryTransientUpload(() => this.create(baseParams), options);
     if (created.reuse) {
+      if (!created.fileID || created.fileID <= 0) {
+        throw new Pan123ApiError({
+          message: 'Upload create reported reuse but did not return a valid fileID.',
+          response: created
+        });
+      }
+      await emitProgress(options.onProgress, {
+        stage: 'reuse',
+        loadedBytes: size,
+        totalBytes: size,
+        percent: 100
+      });
       return {
-        fileID: Number(created.fileID),
+        fileID: created.fileID,
         completed: true,
         reuse: true
       };
@@ -125,30 +243,36 @@ export class UploadModule extends ApiModule {
       const start = index * sliceSize;
       const length = Math.min(sliceSize, size - start);
       const buffer = await readFileRange(options.filePath, start, length);
-      await this.slice({
-        uploadURL,
-        preuploadID: created.preuploadID,
-        sliceNo: index + 1,
-        sliceMD5: md5Buffer(buffer),
-        slice: buffer,
-        filename: `${filename}.part${index + 1}`
+      const sliceNo = index + 1;
+      await retryTransientUpload(
+        () =>
+          this.slice({
+            uploadURL,
+            preuploadID: created.preuploadID!,
+            sliceNo,
+            sliceMD5: md5Buffer(buffer),
+            slice: buffer,
+            filename: `${filename}.part${sliceNo}`
+          }),
+        options
+      );
+      const loadedBytes = Math.min(size, start + length);
+      await emitProgress(options.onProgress, {
+        stage: 'slice',
+        loadedBytes,
+        totalBytes: size,
+        percent: size === 0 ? 100 : (loadedBytes / size) * 100,
+        sliceNo,
+        totalSlices,
+        completedSlices: sliceNo
       });
     }
 
-    for (let attempt = 0; attempt < 60; attempt++) {
-      const completed = await this.complete({ preuploadID: created.preuploadID });
-      if (completed.completed && completed.fileID) {
-        return {
-          fileID: completed.fileID,
-          completed: true
-        };
-      }
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-
-    throw new Pan123ApiError({
-      message: 'Upload completion did not finish after 60 polling attempts'
-    });
+    const completed = await this.waitForUploadComplete(created.preuploadID, options, options.onProgress, size);
+    return {
+      fileID: completed.fileID,
+      completed: true
+    };
   }
 
   private async singleUpload(params: UploadCreateParams & { uploadURL?: string; filePath: string }): Promise<UploadCompleteData> {
@@ -170,6 +294,62 @@ export class UploadModule extends ApiModule {
         duplicate: params.duplicate,
         containDir: params.containDir
       }
+    });
+  }
+
+  private completeOnce(preuploadID: string): Promise<UploadCompleteData> {
+    return this.http.request('POST', '/upload/v2/file/upload_complete', {
+      body: {
+        preuploadID
+      }
+    });
+  }
+
+  private async waitForUploadComplete(
+    preuploadID: string,
+    options: CompletePollingOptions & UploadRetryOptions,
+    onProgress: ProgressCallback,
+    totalBytes: number
+  ): Promise<UploadCompleteData> {
+    const attempts = positiveInteger(options.completePollingAttempts, DEFAULT_COMPLETE_POLLING_ATTEMPTS);
+    const delayMs = nonNegativeInteger(options.completePollingDelayMs, DEFAULT_COMPLETE_POLLING_DELAY_MS);
+    let lastResponse: UploadCompleteData | undefined;
+
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        const completed = await retryTransientUpload(() => this.completeOnce(preuploadID), options);
+        lastResponse = completed;
+        if (isCompletedUpload(completed)) {
+          await emitProgress(onProgress, {
+            stage: 'complete',
+            loadedBytes: totalBytes,
+            totalBytes,
+            percent: 100,
+            attempt
+          });
+          return completed;
+        }
+      } catch (error) {
+        if (!(error instanceof Pan123ApiError && error.code === 20103) || attempt === attempts) {
+          throw error;
+        }
+      }
+
+      await emitProgress(onProgress, {
+        stage: 'complete',
+        loadedBytes: totalBytes,
+        totalBytes,
+        percent: 100,
+        attempt
+      });
+      if (attempt < attempts) {
+        await delay(delayMs);
+      }
+    }
+
+    throw new Pan123ApiError({
+      message: `Upload completion did not return completed=true with a valid fileID after ${attempts} polling attempts.`,
+      response: lastResponse
     });
   }
 }

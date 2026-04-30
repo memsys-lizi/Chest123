@@ -8,6 +8,10 @@ export function appendFormFields(form: FormData, fields: Pan123FormFields): void
       form.append(key, rawValue.value, rawValue.options as FormData.AppendOptions);
       continue;
     }
-    form.append(key, rawValue as string | number | boolean | Buffer | NodeJS.ReadableStream);
+    if (Buffer.isBuffer(rawValue) || typeof rawValue === 'string' || typeof rawValue === 'object') {
+      form.append(key, rawValue as string | Buffer | NodeJS.ReadableStream);
+      continue;
+    }
+    form.append(key, String(rawValue));
   }
 }

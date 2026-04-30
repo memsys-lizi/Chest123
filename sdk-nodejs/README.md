@@ -556,6 +556,11 @@ HTTP：高层 helper，内部会调用 V2 上传接口。
 | `duplicate` | `number` | 否 | `1` 保留两者，`2` 覆盖原文件 |
 | `containDir` | `boolean` | 否 | 文件名是否包含路径 |
 | `singleUploadMaxBytes` | `number` | 否 | 单步上传阈值，默认 1GB |
+| `completePollingAttempts` | `number` | 否 | 分片上传完成轮询次数，默认 60 |
+| `completePollingDelayMs` | `number` | 否 | 分片上传完成轮询间隔，默认 1000ms |
+| `transientRetryAttempts` | `number` | 否 | 上传削峰、限流等临时错误重试次数，默认 5 |
+| `transientRetryDelayMs` | `number` | 否 | 临时错误重试间隔，默认 1000ms |
+| `onProgress` | `(event) => void \| Promise<void>` | 否 | 上传进度回调 |
 
 返回：
 
@@ -565,13 +570,18 @@ HTTP：高层 helper，内部会调用 V2 上传接口。
 | `completed` | `boolean` | 是否上传完成 |
 | `reuse` | `boolean` | 是否秒传，可能不存在 |
 
+注意：`uploadFile()` 是高层上传 helper，只有拿到 `completed: true` 且 `fileID > 0` 才会返回成功。若 123 云盘返回 `completed: false`、`fileID: 0`、文件检测中超时或业务错误，SDK 会抛出 `Pan123ApiError` 并保留原始响应，避免调用方误以为上传已完成。
+
 示例：
 
 ```ts
 const result = await client.upload.uploadFile({
   filePath: './Test.txt',
   parentFileID: 0,
-  duplicate: 1
+  duplicate: 1,
+  onProgress: event => {
+    console.log(event.stage, event.percent);
+  }
 });
 ```
 

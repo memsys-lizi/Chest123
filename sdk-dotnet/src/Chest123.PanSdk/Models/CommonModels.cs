@@ -178,6 +178,13 @@ public sealed class UploadFileRequest
     public int? Duplicate { get; set; }
     public bool? ContainDir { get; set; }
     public long SingleUploadMaxBytes { get; set; } = 1024L * 1024 * 1024;
+    public int SingleUploadRetryAttempts { get; set; } = 5;
+    public TimeSpan SingleUploadRetryDelay { get; set; } = TimeSpan.FromSeconds(1);
+    public int CompletePollingAttempts { get; set; } = 60;
+    public TimeSpan CompletePollingDelay { get; set; } = TimeSpan.FromSeconds(1);
+    public int TransientRetryAttempts { get; set; } = 5;
+    public TimeSpan TransientRetryDelay { get; set; } = TimeSpan.FromSeconds(1);
+    public Func<UploadProgressEvent, CancellationToken, ValueTask>? OnProgressAsync { get; set; }
 }
 
 public sealed class UploadFileResult
@@ -185,6 +192,18 @@ public sealed class UploadFileResult
     public long FileID { get; set; }
     public bool Completed { get; set; }
     public bool Reuse { get; set; }
+}
+
+public sealed class UploadProgressEvent
+{
+    public string Stage { get; set; } = string.Empty;
+    public long LoadedBytes { get; set; }
+    public long TotalBytes { get; set; }
+    public double Percent { get; set; }
+    public int? SliceNo { get; set; }
+    public int? TotalSlices { get; set; }
+    public int? CompletedSlices { get; set; }
+    public int? Attempt { get; set; }
 }
 
 public sealed class DirectLinkUrlRequest

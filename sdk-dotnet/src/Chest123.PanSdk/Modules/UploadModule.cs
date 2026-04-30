@@ -6,6 +6,8 @@ namespace Chest123.PanSdk.Modules;
 
 public sealed class UploadModule : ApiModule
 {
+    private const int FileCheckingCode = 20103;
+
     internal UploadModule(Pan123HttpClient http) : base(http) { }
 
     public Task<UploadCreateData?> CreateAsync(UploadCreateRequest request, CancellationToken cancellationToken = default)
@@ -61,7 +63,21 @@ public sealed class UploadModule : ApiModule
         var fileInfo = new System.IO.FileInfo(request.FilePath);
         if (!fileInfo.Exists) throw new FileNotFoundException("Upload file does not exist.", request.FilePath);
         var filename = request.Filename ?? fileInfo.Name;
+        await EmitProgressAsync(request, new UploadProgressEvent
+        {
+            Stage = "hashing",
+            LoadedBytes = 0,
+            TotalBytes = fileInfo.Length,
+            Percent = 0
+        }, cancellationToken).ConfigureAwait(false);
         var etag = await HashHelper.ComputeFileMd5Async(request.FilePath, cancellationToken).ConfigureAwait(false);
+        await EmitProgressAsync(request, new UploadProgressEvent
+        {
+            Stage = "hashing",
+            LoadedBytes = fileInfo.Length,
+            TotalBytes = fileInfo.Length,
+            Percent = 100
+        }, cancellationToken).ConfigureAwait(false);
         var uploadRequest = new UploadCreateRequest
         {
             ParentFileID = request.ParentFileID,
@@ -76,16 +92,40 @@ public sealed class UploadModule : ApiModule
         {
             var domains = await DomainAsync(cancellationToken).ConfigureAwait(false);
             if (domains is null || domains.Count == 0) throw new Pan123ApiException("No upload domain returned.");
-            var result = await SingleAsync(domains[0], request.FilePath, uploadRequest, cancellationToken).ConfigureAwait(false);
-            if (result is null) throw new Pan123ApiException("Single upload returned no data.");
-            return new UploadFileResult { FileID = result.FileID, Completed = result.Completed };
+            var result = await UploadSingleUntilCompleteAsync(domains[0], request.FilePath, uploadRequest, request, cancellationToken).ConfigureAwait(false);
+            await EmitProgressAsync(request, new UploadProgressEvent
+            {
+                Stage = "single",
+                LoadedBytes = fileInfo.Length,
+                TotalBytes = fileInfo.Length,
+                Percent = 100
+            }, cancellationToken).ConfigureAwait(false);
+            return new UploadFileResult { FileID = result.FileID, Completed = true };
         }
 
-        var created = await CreateAsync(uploadRequest, cancellationToken).ConfigureAwait(false);
+        await EmitProgressAsync(request, new UploadProgressEvent
+        {
+            Stage = "create",
+            LoadedBytes = 0,
+            TotalBytes = fileInfo.Length,
+            Percent = 0
+        }, cancellationToken).ConfigureAwait(false);
+        var created = await RetryTransientUploadAsync(() => CreateAsync(uploadRequest, cancellationToken), request, cancellationToken).ConfigureAwait(false);
         if (created is null) throw new Pan123ApiException("Upload create returned no data.");
         if (created.Reuse)
         {
-            return new UploadFileResult { FileID = created.FileID ?? 0, Completed = true, Reuse = true };
+            if (!created.FileID.HasValue || created.FileID.Value <= 0)
+            {
+                throw new Pan123ApiException("Upload create reported reuse but did not return a valid fileID.");
+            }
+            await EmitProgressAsync(request, new UploadProgressEvent
+            {
+                Stage = "reuse",
+                LoadedBytes = fileInfo.Length,
+                TotalBytes = fileInfo.Length,
+                Percent = 100
+            }, cancellationToken).ConfigureAwait(false);
+            return new UploadFileResult { FileID = created.FileID.Value, Completed = true, Reuse = true };
         }
         if (string.IsNullOrWhiteSpace(created.PreuploadID) || !created.SliceSize.HasValue || created.Servers is null || created.Servers.Count == 0)
         {
@@ -96,27 +136,158 @@ public sealed class UploadModule : ApiModule
         var buffer = new byte[created.SliceSize.Value];
         using var stream = File.OpenRead(request.FilePath);
         var sliceNo = 1;
+        var totalSlices = (int)Math.Ceiling(fileInfo.Length / (double)created.SliceSize.Value);
         int read;
         while ((read = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false)) > 0)
         {
             var sliceBytes = read == buffer.Length ? buffer : buffer.Take(read).ToArray();
             var md5 = HashHelper.ComputeBufferMd5(sliceBytes);
             using var sliceStream = new MemoryStream(sliceBytes, writable: false);
-            await SliceAsync(created.Servers[0], preuploadID, sliceNo, md5, sliceStream, $"{filename}.part{sliceNo}", cancellationToken).ConfigureAwait(false);
+            var currentSliceNo = sliceNo;
+            await RetryTransientUploadAsync(
+                () => SliceAsync(created.Servers[0], preuploadID, currentSliceNo, md5, sliceStream, $"{filename}.part{currentSliceNo}", cancellationToken),
+                request,
+                cancellationToken).ConfigureAwait(false);
+            var loadedBytes = Math.Min(fileInfo.Length, (long)currentSliceNo * created.SliceSize.Value);
+            await EmitProgressAsync(request, new UploadProgressEvent
+            {
+                Stage = "slice",
+                LoadedBytes = loadedBytes,
+                TotalBytes = fileInfo.Length,
+                Percent = fileInfo.Length == 0 ? 100 : loadedBytes * 100d / fileInfo.Length,
+                SliceNo = currentSliceNo,
+                TotalSlices = totalSlices,
+                CompletedSlices = currentSliceNo
+            }, cancellationToken).ConfigureAwait(false);
             sliceNo++;
         }
 
-        for (var attempt = 0; attempt < 60; attempt++)
+        var completed = await WaitForUploadCompleteAsync(preuploadID, request, fileInfo.Length, cancellationToken).ConfigureAwait(false);
+        return new UploadFileResult { FileID = completed.FileID, Completed = true };
+    }
+
+    public Task<UploadCompleteData> WaitCompleteAsync(string preuploadID, int attempts = 60, TimeSpan? delay = null, CancellationToken cancellationToken = default)
+    {
+        var request = new UploadFileRequest
         {
-            var completed = await CompleteAsync(preuploadID, cancellationToken).ConfigureAwait(false);
-            if (completed is not null && completed.Completed && completed.FileID > 0)
+            CompletePollingAttempts = attempts,
+            CompletePollingDelay = delay ?? TimeSpan.FromSeconds(1)
+        };
+        return WaitForUploadCompleteAsync(preuploadID, request, totalBytes: 0, cancellationToken);
+    }
+
+    private async Task<UploadCompleteData> UploadSingleUntilCompleteAsync(string uploadUrl, string filePath, UploadCreateRequest uploadRequest, UploadFileRequest request, CancellationToken cancellationToken)
+    {
+        var attempts = Positive(request.SingleUploadRetryAttempts, 5);
+        UploadCompleteData? lastResult = null;
+        for (var attempt = 1; attempt <= attempts; attempt++)
+        {
+            var result = await RetryTransientUploadAsync(() => SingleAsync(uploadUrl, filePath, uploadRequest, cancellationToken), request, cancellationToken).ConfigureAwait(false);
+            if (IsCompletedUpload(result))
             {
-                return new UploadFileResult { FileID = completed.FileID, Completed = true };
+                return result!;
             }
-            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+            lastResult = result;
+            if (attempt < attempts)
+            {
+                await Task.Delay(NonNegative(request.SingleUploadRetryDelay, TimeSpan.FromSeconds(1)), cancellationToken).ConfigureAwait(false);
+            }
         }
 
-        throw new Pan123ApiException("Upload completion did not finish after 60 polling attempts.");
+        throw new Pan123ApiException("Single upload did not return a completed upload with a valid fileID.", responseBody: JsonSerializer.Serialize(lastResult, JsonHelper.Options));
+    }
+
+    private async Task<UploadCompleteData> WaitForUploadCompleteAsync(string preuploadID, UploadFileRequest request, long totalBytes, CancellationToken cancellationToken)
+    {
+        var attempts = Positive(request.CompletePollingAttempts, 60);
+        var delay = NonNegative(request.CompletePollingDelay, TimeSpan.FromSeconds(1));
+        UploadCompleteData? lastResult = null;
+
+        for (var attempt = 1; attempt <= attempts; attempt++)
+        {
+            try
+            {
+                var completed = await RetryTransientUploadAsync(() => CompleteAsync(preuploadID, cancellationToken), request, cancellationToken).ConfigureAwait(false);
+                if (IsCompletedUpload(completed))
+                {
+                    await EmitProgressAsync(request, new UploadProgressEvent
+                    {
+                        Stage = "complete",
+                        LoadedBytes = totalBytes,
+                        TotalBytes = totalBytes,
+                        Percent = 100,
+                        Attempt = attempt
+                    }, cancellationToken).ConfigureAwait(false);
+                    return completed!;
+                }
+                lastResult = completed;
+            }
+            catch (Pan123ApiException ex) when (ex.Code == FileCheckingCode && attempt < attempts)
+            {
+                // The API documents this as a polling state: wait and call upload_complete again.
+            }
+
+            await EmitProgressAsync(request, new UploadProgressEvent
+            {
+                Stage = "complete",
+                LoadedBytes = totalBytes,
+                TotalBytes = totalBytes,
+                Percent = 100,
+                Attempt = attempt
+            }, cancellationToken).ConfigureAwait(false);
+            if (attempt < attempts)
+            {
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        throw new Pan123ApiException($"Upload completion did not return completed=true with a valid fileID after {attempts} polling attempts.", responseBody: JsonSerializer.Serialize(lastResult, JsonHelper.Options));
+    }
+
+    private static bool IsCompletedUpload(UploadCompleteData? data)
+        => data is not null && data.Completed && data.FileID > 0;
+
+    private static int Positive(int value, int fallback)
+        => Math.Max(1, value <= 0 ? fallback : value);
+
+    private static TimeSpan NonNegative(TimeSpan value, TimeSpan fallback)
+        => value < TimeSpan.Zero ? fallback : value;
+
+    private static bool IsTransientUploadError(Pan123ApiException exception)
+    {
+        if ((int?)exception.StatusCode == 429 || exception.Code == 429) return true;
+        return exception.Code == 1 &&
+            (exception.Message.IndexOf("秒传队列", StringComparison.Ordinal) >= 0 ||
+             exception.Message.IndexOf("削峰", StringComparison.Ordinal) >= 0 ||
+             exception.Message.IndexOf("请慢一点", StringComparison.Ordinal) >= 0);
+    }
+
+    private static async Task<T?> RetryTransientUploadAsync<T>(Func<Task<T?>> task, UploadFileRequest request, CancellationToken cancellationToken)
+    {
+        var attempts = Positive(request.TransientRetryAttempts, 5);
+        var delay = NonNegative(request.TransientRetryDelay, TimeSpan.FromSeconds(1));
+
+        for (var attempt = 1; attempt <= attempts; attempt++)
+        {
+            try
+            {
+                return await task().ConfigureAwait(false);
+            }
+            catch (Pan123ApiException ex) when (IsTransientUploadError(ex) && attempt < attempts)
+            {
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        return await task().ConfigureAwait(false);
+    }
+
+    private static async Task EmitProgressAsync(UploadFileRequest request, UploadProgressEvent progress, CancellationToken cancellationToken)
+    {
+        if (request.OnProgressAsync is not null)
+        {
+            await request.OnProgressAsync(progress, cancellationToken).ConfigureAwait(false);
+        }
     }
 }
 

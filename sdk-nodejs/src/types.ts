@@ -123,6 +123,19 @@ export interface UploadCompleteData {
   fileID: number;
 }
 
+export type UploadProgressStage = 'hashing' | 'single' | 'create' | 'reuse' | 'slice' | 'complete';
+
+export interface UploadProgressEvent {
+  stage: UploadProgressStage;
+  loadedBytes: number;
+  totalBytes: number;
+  percent: number;
+  sliceNo?: number;
+  totalSlices?: number;
+  completedSlices?: number;
+  attempt?: number;
+}
+
 export interface UploadFileOptions {
   filePath: string;
   parentFileID: number;
@@ -134,6 +147,27 @@ export interface UploadFileOptions {
    * Lower values are useful for tests.
    */
   singleUploadMaxBytes?: number;
+  /**
+   * Maximum upload_complete polling attempts for multipart uploads.
+   * Defaults to 60.
+   */
+  completePollingAttempts?: number;
+  /**
+   * Delay between upload_complete polling attempts in milliseconds.
+   * Defaults to 1000.
+   */
+  completePollingDelayMs?: number;
+  /**
+   * Retries transient upload queue/rate-limit responses such as
+   * "任务队列削峰中,请慢一点". Defaults to 5.
+   */
+  transientRetryAttempts?: number;
+  /**
+   * Delay between transient upload retries in milliseconds.
+   * Defaults to 1000.
+   */
+  transientRetryDelayMs?: number;
+  onProgress?: (event: UploadProgressEvent) => void | Promise<void>;
 }
 
 export interface UploadFileResult {
