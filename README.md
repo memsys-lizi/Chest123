@@ -2,7 +2,7 @@
 
 这是一个面向 123 云盘开放平台的 SDK 项目，目标是把官方开放 API 封装成更容易在业务服务端中使用的多语言 SDK。
 
-当前已经完成 Node.js 版本 SDK，并新增 .NET/C# 版本 SDK。后续可以在同一仓库中继续增加 Go 等其他语言实现。每种语言 SDK 都放在独立目录中，并维护自己的 README、测试和构建方式。
+当前已经完成 Node.js、.NET/C# 和 Go 版本 SDK。后续可以在同一仓库中继续增加其他语言实现。每种语言 SDK 都放在独立目录中，并维护自己的 README、测试和构建方式。
 
 ## 当前内容
 
@@ -12,6 +12,8 @@
 | [`sdk-nodejs/README.md`](./sdk-nodejs/README.md) | Node.js SDK 使用文档 |
 | [`sdk-dotnet`](./sdk-dotnet) | C#/.NET SDK，NuGet 包名为 `Chest123.PanSdk` |
 | [`sdk-dotnet/README.md`](./sdk-dotnet/README.md) | .NET SDK 使用文档 |
+| [`sdk-go`](./sdk-go) | Go SDK，module path 为 `github.com/memsys-lizi/Chest123/sdk-go` |
+| [`sdk-go/README.md`](./sdk-go/README.md) | Go SDK 使用文档 |
 | [`123PanDoc`](./123PanDoc) | 123 云盘官方开放平台 API 的本地整理文档 |
 | [`123PanDoc/99-endpoint-index.md`](./123PanDoc/99-endpoint-index.md) | API 接口总索引 |
 
@@ -61,6 +63,43 @@ var files = await client.Files.ListAsync(new FileListRequest
 ```
 
 更多用法见 [`sdk-dotnet/README.md`](./sdk-dotnet/README.md)。
+
+## Go SDK
+
+Go SDK 封装同一套 123 云盘开放平台能力，适用于 Go 服务端、CLI、任务程序等场景。
+
+最小示例：
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "os"
+
+    pan123 "github.com/memsys-lizi/Chest123/sdk-go"
+)
+
+func main() {
+    client := pan123.NewClient(pan123.Options{
+        ClientID:     os.Getenv("PAN123_CLIENT_ID"),
+        ClientSecret: os.Getenv("PAN123_CLIENT_SECRET"),
+    })
+
+    files, err := client.Files.List(context.Background(), pan123.FileListRequest{
+        ParentFileID: 0,
+        Limit:        100,
+    })
+    if err != nil {
+        panic(err)
+    }
+
+    fmt.Println(files.FileList)
+}
+```
+
+更多用法见 [`sdk-go/README.md`](./sdk-go/README.md)。
 
 ## 官方 API 文档
 
