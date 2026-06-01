@@ -24,6 +24,7 @@ Token 行为：
 - SDK 会自动获取、缓存并维护 `access_token`。
 - 调用需要鉴权的业务接口时，SDK 会先检查当前 token 是否可用。
 - 如果没有 token，或 token 已过期/即将过期，SDK 会自动调用 `POST /api/v1/access_token` 获取新 token。
+- 如果业务接口返回 `token is expired`、`access_token` 失效或 HTTP `401`，SDK 会清除当前 token，重新获取一次 token，并自动重试原请求一次。
 - 正常业务代码可以直接调用 `client.files.list(...)`、`client.upload.uploadFile(...)` 等方法，不需要手动先获取 token。
 - `client.auth.ensureAccessToken()` 是可选方法，适合你想提前预热 token 或调试 token 状态时使用。
 

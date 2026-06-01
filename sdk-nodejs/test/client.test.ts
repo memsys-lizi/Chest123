@@ -86,8 +86,8 @@ describe('Pan123Client', () => {
     nock(baseURL)
       .get('/api/v1/user/info')
       .reply(200, {
-        code: 401,
-        message: 'access_token无效',
+        code: 5066,
+        message: '文件不存在',
         data: null,
         'x-traceID': 'trace-error'
       });
@@ -95,9 +95,47 @@ describe('Pan123Client', () => {
     const client = createPan123Client({ clientId: 'client', clientSecret: 'secret' });
     await expect(client.user.info()).rejects.toMatchObject({
       name: 'Pan123ApiError',
-      code: 401,
+      code: 5066,
       traceId: 'trace-error'
     } satisfies Partial<Pan123ApiError>);
+  });
+
+  it('refreshes the access token and retries once when the API reports token expired', async () => {
+    const expiredListScope = nock(baseURL)
+      .get('/api/v2/file/list')
+      .query({ parentFileId: 0, limit: 100 })
+      .matchHeader('Authorization', 'Bearer old-token')
+      .reply(200, {
+        code: 401,
+        message: 'token is expired',
+        data: null,
+        'x-traceID': 'trace-expired'
+      });
+    const tokenScope = mockToken();
+    const refreshedListScope = nock(baseURL)
+      .get('/api/v2/file/list')
+      .query({ parentFileId: 0, limit: 100 })
+      .matchHeader('Authorization', 'Bearer token-123')
+      .reply(200, {
+        code: 0,
+        message: 'ok',
+        data: { lastFileId: -1, fileList: [] }
+      });
+
+    const client = createPan123Client({
+      clientId: 'client',
+      clientSecret: 'secret',
+      accessToken: 'old-token',
+      tokenExpiresAt: '2099-01-01T00:00:00+08:00'
+    });
+
+    await expect(client.files.list({ parentFileId: 0, limit: 100 })).resolves.toEqual({
+      lastFileId: -1,
+      fileList: []
+    });
+    expect(expiredListScope.isDone()).toBe(true);
+    expect(tokenScope.isDone()).toBe(true);
+    expect(refreshedListScope.isDone()).toBe(true);
   });
 
   it('supports the low-level request escape hatch', async () => {

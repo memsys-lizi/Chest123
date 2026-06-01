@@ -27,6 +27,24 @@ function isPan123Response(value: unknown): value is Pan123Response {
   return Boolean(value && typeof value === 'object' && 'code' in value && 'message' in value);
 }
 
+function isTokenExpiredError(error: Pan123ApiError): boolean {
+  const message = error.message.toLowerCase();
+  return (
+    error.code === 401 ||
+    error.status === 401 ||
+    message.includes('token is expired') ||
+    message.includes('access_token') ||
+    message.includes('access token') ||
+    message.includes('token expired')
+  );
+}
+
+function getResponseField(responseBody: unknown, field: string): unknown {
+  return responseBody && typeof responseBody === 'object' && field in responseBody
+    ? responseBody[field as keyof typeof responseBody]
+    : undefined;
+}
+
 export class Pan123HttpClient {
   readonly baseURL: string;
   readonly platform: string;
@@ -98,6 +116,20 @@ export class Pan123HttpClient {
     requestPath: string,
     options: Pan123RequestOptions = {}
   ): Promise<T> {
+    return this.requestOnce<T>(method, requestPath, options, true);
+  }
+
+  private clearAccessToken(): void {
+    this.accessToken = undefined;
+    this.tokenExpiresAtMs = undefined;
+  }
+
+  private async requestOnce<T = unknown>(
+    method: HttpMethod,
+    requestPath: string,
+    options: Pan123RequestOptions,
+    allowTokenRefreshRetry: boolean
+  ): Promise<T> {
     const headers: Record<string, string> = {
       Platform: this.platform,
       ...options.headers
@@ -147,19 +179,42 @@ export class Pan123HttpClient {
       }
       return body as T;
     } catch (error) {
-      if (error instanceof Pan123ApiError) throw error;
+      if (error instanceof Pan123ApiError) {
+        if (
+          allowTokenRefreshRetry &&
+          options.auth !== false &&
+          this.clientId &&
+          this.clientSecret &&
+          isTokenExpiredError(error)
+        ) {
+          this.clearAccessToken();
+          return this.requestOnce<T>(method, requestPath, options, false);
+        }
+        throw error;
+      }
       if (error instanceof AxiosError) {
         const responseBody = error.response?.data;
-        const traceId =
-          responseBody && typeof responseBody === 'object' && 'x-traceID' in responseBody
-            ? String(responseBody['x-traceID'])
-            : undefined;
-        throw new Pan123ApiError({
-          message: error.message,
+        const traceId = getResponseField(responseBody, 'x-traceID');
+        const code = getResponseField(responseBody, 'code');
+        const message = getResponseField(responseBody, 'message');
+        const apiError = new Pan123ApiError({
+          code: typeof code === 'number' ? code : undefined,
+          message: typeof message === 'string' ? message : error.message,
           status: error.response?.status,
-          traceId,
+          traceId: traceId === undefined ? undefined : String(traceId),
           response: responseBody
         });
+        if (
+          allowTokenRefreshRetry &&
+          options.auth !== false &&
+          this.clientId &&
+          this.clientSecret &&
+          isTokenExpiredError(apiError)
+        ) {
+          this.clearAccessToken();
+          return this.requestOnce<T>(method, requestPath, options, false);
+        }
+        throw apiError;
       }
       throw error;
     }
